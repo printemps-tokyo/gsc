@@ -3,7 +3,7 @@
  * turning API rows into numbers. Nothing here touches the network.
  */
 
-import type { QueryResponse, QueryRow } from "./api.js";
+import type { DimensionFilter, QueryResponse, QueryRow } from "./api.js";
 import type { Metrics, Site } from "./types.js";
 
 /**
@@ -44,10 +44,20 @@ export const PROBE_SLACK_DAYS = 10;
 export interface Window {
   start: string;
   end: string;
-  /** "final": end is the last day whose data is complete. "fresh": end is today (PT), and data from `incompleteFrom` on is preliminary. */
-  mode: "final" | "fresh";
+  /**
+   * "final": ends on the last day of complete data. "fresh": ends today (PT)
+   * and includes preliminary data. "fixed": the range was given with
+   * --start/--end.
+   */
+  mode: "final" | "fresh" | "fixed";
   /** First date still being collected, when Search Console reported one. */
   incompleteFrom?: string;
+  /**
+   * For "final": "reported" when the end comes from Search Console's
+   * firstIncompleteDate, "assumed" when Search Console did not report one and
+   * the range ends yesterday (PT), whose newest days may still be incomplete.
+   */
+  boundary?: "reported" | "assumed";
 }
 
 /**
@@ -67,21 +77,24 @@ export function probeBody(days: number, today: string): { startDate: string; end
 /**
  * Pick the window from the probe's response.
  *
- * Final mode ends the day before `firstIncompleteDate`. When Search Console
- * reports no incomplete date, everything returned is complete, so the window
- * ends on the newest date with data, or yesterday (PT) when there is none.
+ * Final mode ends the day before `firstIncompleteDate`. Days without data are
+ * left out of date-grouped rows, so the newest row says nothing about where
+ * complete data ends; when Search Console reports no incomplete date, the
+ * window ends yesterday (PT) and is marked `boundary: "assumed"`.
  * Fresh mode always ends today (PT).
  */
 export function chooseWindow(probe: QueryResponse, days: number, today: string, fresh: boolean): Window {
   const incompleteFrom = probe.metadata?.firstIncompleteDate;
   let end: string;
+  let boundary: Window["boundary"];
   if (fresh) {
     end = today;
   } else if (incompleteFrom) {
     end = addDays(incompleteFrom, -1);
+    boundary = "reported";
   } else {
-    const dates = (probe.rows ?? []).map((r) => r.keys?.[0] ?? "").filter(Boolean).sort();
-    end = dates.at(-1) ?? addDays(today, -1);
+    end = addDays(today, -1);
+    boundary = "assumed";
   }
   if (end > today) end = today;
   return {
@@ -89,7 +102,35 @@ export function chooseWindow(probe: QueryResponse, days: number, today: string, 
     end,
     mode: fresh ? "fresh" : "final",
     ...(incompleteFrom ? { incompleteFrom } : {}),
+    ...(boundary ? { boundary } : {}),
   };
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A valid calendar date in YYYY-MM-DD form. */
+export function isDate(value: string): boolean {
+  return DATE_RE.test(value) && addDays(value, 0) === value;
+}
+
+/** A window given explicitly with --start and --end (both inclusive, PT dates). */
+export function fixedWindow(start: string, end: string, today: string): Window {
+  if (!isDate(start) || !isDate(end)) throw new Error("--start and --end must be dates in YYYY-MM-DD form");
+  if (start > end) throw new Error("--start must not be after --end");
+  if (end > today) throw new Error(`--end ${end} is in the future (today is ${today} in Pacific Time)`);
+  return { start, end, mode: "fixed" };
+}
+
+/** Number of days in a window, inclusive. */
+export function windowDays(w: Window): number {
+  return datesBetween(w.start, w.end).length;
+}
+
+/** The window of the same length that ends the day before `w` starts, for --compare. */
+export function previousWindow(w: Window): Window {
+  const len = windowDays(w);
+  const end = addDays(w.start, -1);
+  return { start: addDays(end, -(len - 1)), end, mode: w.mode === "fixed" ? "fixed" : "final" };
 }
 
 export function metricsOf(row: QueryRow | undefined): Metrics {
@@ -138,29 +179,74 @@ export function rankedOf(res: QueryResponse, n = Infinity): { key: string; metri
     .slice(0, n);
 }
 
+/** What a --site argument resolved to: a property, and optionally a host to narrow it to. */
+export interface Target {
+  site: Site;
+  /**
+   * Set when the argument was a subdomain covered by a Domain property: the
+   * report is that property filtered to pages on this host.
+   */
+  host?: string;
+}
+
+function bareHost(input: string): string | undefined {
+  // A bare host has no scheme, no "sc-domain:", no path.
+  return /^[a-z0-9.-]+$/i.test(input) && input.includes(".") ? input.toLowerCase() : undefined;
+}
+
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Find the property a user means. Exact siteUrl first; then a bare host
- * ("example.com") matches its Domain property ("sc-domain:example.com") or a
- * URL-prefix property on that host. More than one match is an error that
- * lists them.
+ * Find the property a user means.
+ *
+ * - An exact siteUrl, or a URL that normalizes to one ("https://example.com"
+ *   for "https://example.com/"), is used as is. A URL or "sc-domain:" that
+ *   matches nothing is an error: a different property would cover a
+ *   different scope.
+ * - A bare host ("example.com") matches its Domain property
+ *   ("sc-domain:example.com") or a URL-prefix property at the root of that
+ *   host. Several matches are an error that lists them.
+ * - A bare subdomain covered by a Domain property ("blog.example.com" under
+ *   "sc-domain:example.com") resolves to that property narrowed to pages on
+ *   the subdomain, and says so.
  */
-export function resolveSite(input: string, sites: Site[]): Site {
+export function resolveSite(input: string, sites: Site[]): Target {
   const wanted = input.trim();
-  const exact = sites.find((s) => s.siteUrl === wanted);
-  if (exact) return exact;
-  const host = wanted.replace(/^sc-domain:/, "").replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
+  const known = sites.map((s) => s.siteUrl).join(", ") || "none";
+  const exact = sites.find((s) => s.siteUrl === wanted || sameUrl(s.siteUrl, wanted));
+  if (exact) return { site: exact };
+  const host = bareHost(wanted);
+  if (!host) throw new Error(`no Search Console property is exactly "${input}" (visible: ${known})`);
+
   const matches = sites.filter((s) => {
     if (s.siteUrl.startsWith("sc-domain:")) return s.siteUrl.slice("sc-domain:".length).toLowerCase() === host;
     try {
-      return new URL(s.siteUrl).host.toLowerCase() === host;
+      const u = new URL(s.siteUrl);
+      return u.host.toLowerCase() === host && u.pathname === "/";
     } catch {
       return false;
     }
   });
-  if (matches.length === 1) return matches[0]!;
+  if (matches.length === 1) return { site: matches[0]! };
   if (matches.length > 1) {
     throw new Error(`"${input}" matches more than one property: ${matches.map((m) => m.siteUrl).join(", ")}; pass one exactly`);
   }
-  const known = sites.map((s) => s.siteUrl).join(", ") || "none";
+  // The longest Domain property that covers this host, e.g. sc-domain:example.com for blog.example.com.
+  const covering = sites
+    .filter((s) => s.siteUrl.startsWith("sc-domain:") && host.endsWith("." + s.siteUrl.slice("sc-domain:".length).toLowerCase()))
+    .sort((a, b) => b.siteUrl.length - a.siteUrl.length)[0];
+  if (covering) return { site: covering, host };
   throw new Error(`no Search Console property matches "${input}" (visible: ${known})`);
+}
+
+/** A page filter that keeps only pages on `host` (http or https). */
+export function hostFilter(host: string): DimensionFilter {
+  const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { dimension: "page", operator: "includingRegex", expression: `^https?://${escaped}(/|$)` };
 }

@@ -5,7 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { requestAccessToken } from "./auth.js";
 import { listSites, querySite } from "./api.js";
 import { allReports, siteReport, type ReportOptions } from "./collect.js";
-import { resolveSite, todayPT } from "./report.js";
+import { fixedWindow, resolveSite, todayPT, windowDays } from "./report.js";
 import {
   renderAllJson,
   renderAllMarkdown,
@@ -27,14 +27,25 @@ Usage:
 or "https://www.example.com/"), or a bare host ("example.com") when that
 matches exactly one property.
 
+A bare subdomain covered by a Domain property ("blog.example.com" under
+"sc-domain:example.com") reports that property filtered to its pages.
+
 Options:
   --days <n>          Days to report (default: 7). The range ends on the last
                       day of complete data, in Pacific Time.
   --fresh             End today (PT) instead, including preliminary data
+  --start <date>      With --end: a fixed range, YYYY-MM-DD in Pacific Time
+  --end <date>        (inclusive; replaces --days). Complete data only unless
+                      --fresh is also given.
+  --compare           Also show the change against the same number of days
+                      just before the range
+  --type <type>       Search type: web (default), image, video, news,
+                      discover, googleNews
   --queries [n]       With --site: also list the top n queries (default: 10)
   --pages [n]         With --site: also list the top n pages (default: 10)
   --key-file <path>   Service-account JSON key (or env GOOGLE_APPLICATION_CREDENTIALS)
   --token <token>     Use this OAuth access token directly (or env GSC_ACCESS_TOKEN)
+                      Command-line credentials win over environment ones.
   --format <md|json>  Output format (default: md)
   -o, --output <file> Write to a file (default: stdout)
   -h, --help          Show this help
@@ -57,9 +68,15 @@ async function readVersion(): Promise<string> {
   }
 }
 
+/**
+ * Credentials in order: --token, --key-file, then GSC_ACCESS_TOKEN, then
+ * GOOGLE_APPLICATION_CREDENTIALS. Anything given on the command line wins
+ * over the environment.
+ */
 async function resolveToken(keyFile: string | undefined, token: string | undefined): Promise<string> {
-  const explicit = token ?? process.env.GSC_ACCESS_TOKEN;
-  if (explicit) return explicit;
+  if (token && keyFile) throw new Error("pass either --token or --key-file, not both");
+  if (token) return token;
+  if (!keyFile && process.env.GSC_ACCESS_TOKEN) return process.env.GSC_ACCESS_TOKEN;
   const path = keyFile ?? process.env.GOOGLE_APPLICATION_CREDENTIALS;
   if (!path) {
     throw new Error(
@@ -91,12 +108,19 @@ function withOptionalCounts(argv: string[], names: string[], fallback: string): 
   return out;
 }
 
-function positiveInt(value: string | undefined, name: string): number | undefined {
+function positiveInt(value: string | undefined, name: string, max = Number.MAX_SAFE_INTEGER): number | undefined {
   if (value === undefined) return undefined;
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1) throw new Error(`${name} must be a positive integer`);
+  if (n > max) throw new Error(`${name} must be at most ${max.toLocaleString("en-US")}`);
   return n;
 }
+
+/** searchAnalytics.query's search types. */
+const TYPES = new Set(["web", "image", "video", "news", "discover", "googleNews"]);
+
+/** One API request returns at most 25,000 rows; top-n lists are not paged. */
+const MAX_TOP = 25_000;
 
 async function emit(output: string, file: string | undefined): Promise<void> {
   if (file) {
@@ -129,6 +153,10 @@ async function main(): Promise<number> {
         site: { type: "string" },
         days: { type: "string" },
         fresh: { type: "boolean" },
+        start: { type: "string" },
+        end: { type: "string" },
+        compare: { type: "boolean" },
+        type: { type: "string" },
         queries: { type: "string" },
         pages: { type: "string" },
         "key-file": { type: "string" },
@@ -142,10 +170,15 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  const site = values.site ?? process.env.GSC_SITE;
-  const modes = [values.list, values.all, site !== undefined].filter(Boolean).length;
-  if (modes !== 1) {
-    process.stderr.write("error: pass exactly one of --list, --all or --site <property>\nrun 'gsc --help' for usage.\n");
+  // GSC_SITE only stands in for --site when no mode was chosen on the command line.
+  const explicitModes = [values.list, values.all, values.site !== undefined].filter(Boolean).length;
+  if (explicitModes > 1) {
+    process.stderr.write("error: pass only one of --list, --all or --site <property>\nrun 'gsc --help' for usage.\n");
+    return 1;
+  }
+  const site = values.site ?? (explicitModes === 0 ? process.env.GSC_SITE : undefined);
+  if (explicitModes === 0 && site === undefined) {
+    process.stderr.write("error: pass one of --list, --all or --site <property>\nrun 'gsc --help' for usage.\n");
     return 1;
   }
   const format = values.format ?? "md";
@@ -154,13 +187,27 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  const today = todayPT();
   let opts: ReportOptions;
   try {
+    if ((values.start === undefined) !== (values.end === undefined)) {
+      throw new Error("--start and --end go together");
+    }
+    if (values.start !== undefined && values.days !== undefined) {
+      throw new Error("--start/--end replace --days; pass one or the other");
+    }
+    if (values.type !== undefined && !TYPES.has(values.type)) {
+      throw new Error(`--type must be one of ${[...TYPES].join(", ")}`);
+    }
+    const fixed = values.start !== undefined ? fixedWindow(values.start, values.end!, today) : undefined;
     opts = {
       days: positiveInt(values.days, "--days") ?? 7,
       fresh: values.fresh === true,
-      queries: positiveInt(values.queries, "--queries"),
-      pages: positiveInt(values.pages, "--pages"),
+      ...(fixed ? { fixed } : {}),
+      compare: values.compare === true,
+      ...(values.type ? { type: values.type } : {}),
+      queries: positiveInt(values.queries, "--queries", MAX_TOP),
+      pages: positiveInt(values.pages, "--pages", MAX_TOP),
     };
   } catch (err) {
     process.stderr.write(`error: ${(err as Error).message}\n`);
@@ -170,8 +217,8 @@ async function main(): Promise<number> {
     process.stderr.write("error: --queries and --pages work with --site only\n");
     return 1;
   }
-  if (values.list && (values.days || values.fresh)) {
-    process.stderr.write("error: --list takes no --days or --fresh\n");
+  if (values.list && (values.days || values.fresh || values.start || values.compare || values.type)) {
+    process.stderr.write("error: --list takes no report options\n");
     return 1;
   }
 
@@ -179,7 +226,6 @@ async function main(): Promise<number> {
     const token = await resolveToken(values["key-file"], values.token);
     const sites = await listSites(token);
     const query = (siteUrl: string, body: Parameters<typeof querySite>[1]) => querySite(siteUrl, body, token);
-    const today = todayPT();
 
     if (values.list) {
       await emit(format === "json" ? renderSitesJson(sites) : renderSitesMarkdown(sites), values.output);
@@ -187,11 +233,12 @@ async function main(): Promise<number> {
     }
     if (values.all) {
       const rows = await allReports(sites, opts, today, query);
-      await emit(format === "json" ? renderAllJson(rows, opts.days) : renderAllMarkdown(rows, opts.days), values.output);
+      const days = opts.fixed ? windowDays(opts.fixed) : opts.days;
+      await emit(format === "json" ? renderAllJson(rows, days) : renderAllMarkdown(rows, days), values.output);
       return rows.some((r) => r.error) ? 1 : 0;
     }
     const target = resolveSite(site!, sites);
-    const report = await siteReport(target.siteUrl, opts, today, query);
+    const report = await siteReport(target.site.siteUrl, { ...opts, ...(target.host ? { host: target.host } : {}) }, today, query);
     await emit(format === "json" ? renderSiteJson(report) : renderSiteMarkdown(report), values.output);
     return 0;
   } catch (err) {
@@ -200,10 +247,14 @@ async function main(): Promise<number> {
   }
 }
 
+// Set the exit code and let Node exit on its own: process.exit() right after
+// a large write to a pipe can cut the output short.
 main().then(
-  (code) => process.exit(code),
+  (code) => {
+    process.exitCode = code;
+  },
   (err) => {
     process.stderr.write(`error: ${(err as Error).message}\n`);
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

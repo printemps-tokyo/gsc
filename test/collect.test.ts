@@ -52,3 +52,33 @@ describe("allReports", () => {
     expect(rows[1]?.error).toContain("HTTP 403");
   });
 });
+
+describe("scope, fixed windows and comparisons", () => {
+  it("applies the search type and host filter to every query, probe included", async () => {
+    const calls: { site: string; body: QueryBody }[] = [];
+    await siteReport(
+      "sc-domain:kweqoo.net",
+      { days: 3, fresh: false, type: "image", host: "kabuto-zukan.kweqoo.net" },
+      "2026-10-01",
+      fake(calls),
+    );
+    expect(calls.length).toBeGreaterThan(1);
+    for (const c of calls) {
+      expect(c.body.type).toBe("image");
+      expect(c.body.dimensionFilterGroups?.[0]?.filters[0]?.expression).toBe("^https?://kabuto-zukan\\.kweqoo\\.net(/|$)");
+    }
+  });
+
+  it("uses a fixed window without probing, and compares against the period before", async () => {
+    const calls: { site: string; body: QueryBody }[] = [];
+    const r = await siteReport(
+      "sc-domain:kweqoo.net",
+      { days: 7, fresh: false, compare: true, fixed: { start: "2026-09-01", end: "2026-09-30", mode: "fixed" } },
+      "2026-10-01",
+      fake(calls),
+    );
+    expect(calls.some((c) => c.body.dataState === "all")).toBe(false);
+    expect(r.previous?.window).toEqual({ start: "2026-08-02", end: "2026-08-31", mode: "fixed" });
+    expect(calls.some((c) => c.body.startDate === "2026-08-02" && c.body.endDate === "2026-08-31")).toBe(true);
+  });
+});

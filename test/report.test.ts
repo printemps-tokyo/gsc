@@ -4,11 +4,16 @@ import {
   chooseWindow,
   dailyOf,
   datesBetween,
+  fixedWindow,
+  hostFilter,
+  isDate,
+  previousWindow,
   probeBody,
   rankedOf,
   resolveSite,
   todayPT,
   totalsOf,
+  windowDays,
 } from "../src/report.js";
 
 describe("dates", () => {
@@ -50,6 +55,7 @@ describe("chooseWindow", () => {
       end: "2026-09-29",
       mode: "final",
       incompleteFrom: "2026-09-30",
+      boundary: "reported",
     });
   });
 
@@ -57,9 +63,34 @@ describe("chooseWindow", () => {
     expect(chooseWindow(probe, 3, "2026-10-01", true)).toMatchObject({ start: "2026-09-29", end: "2026-10-01", mode: "fresh" });
   });
 
-  it("without an incomplete date, ends on the newest row, else yesterday", () => {
-    expect(chooseWindow({ rows: probe.rows }, 1, "2026-10-01", false).end).toBe("2026-09-30");
-    expect(chooseWindow({}, 1, "2026-10-01", false).end).toBe("2026-09-30");
+  it("without an incomplete date, ends yesterday and says the end is assumed", () => {
+    // Days without data are left out of date rows, so an old newest row must
+    // not pull the window back.
+    const sparse = { rows: [{ keys: ["2026-09-20"], impressions: 1 }] };
+    expect(chooseWindow(sparse, 7, "2026-10-01", false)).toEqual({
+      start: "2026-09-24",
+      end: "2026-09-30",
+      mode: "final",
+      boundary: "assumed",
+    });
+    expect(chooseWindow({}, 1, "2026-10-01", false)).toMatchObject({ end: "2026-09-30", boundary: "assumed" });
+  });
+});
+
+describe("fixed and previous windows", () => {
+  it("validates --start/--end", () => {
+    expect(fixedWindow("2026-09-01", "2026-09-30", "2026-10-01")).toEqual({ start: "2026-09-01", end: "2026-09-30", mode: "fixed" });
+    expect(() => fixedWindow("2026-09-31", "2026-09-30", "2026-10-01")).toThrow(/YYYY-MM-DD/);
+    expect(() => fixedWindow("2026-09-30", "2026-09-01", "2026-10-01")).toThrow(/not be after/);
+    expect(() => fixedWindow("2026-09-01", "2026-10-02", "2026-10-01")).toThrow(/future/);
+    expect(isDate("2026-02-29")).toBe(false);
+    expect(isDate("2028-02-29")).toBe(true);
+  });
+
+  it("compares against the same number of days just before", () => {
+    const w = { start: "2026-09-23", end: "2026-09-29", mode: "final" as const, boundary: "reported" as const };
+    expect(windowDays(w)).toBe(7);
+    expect(previousWindow(w)).toEqual({ start: "2026-09-16", end: "2026-09-22", mode: "final" });
   });
 });
 
@@ -108,14 +139,30 @@ describe("resolveSite", () => {
     { siteUrl: "https://example.com/", permissionLevel: "siteOwner" },
   ];
 
-  it("matches exactly, then by host", () => {
-    expect(resolveSite("https://example.com/", sites).siteUrl).toBe("https://example.com/");
-    expect(resolveSite("kweqoo.net", sites).siteUrl).toBe("sc-domain:kweqoo.net");
-    expect(resolveSite("https://blog.example.com/x", sites).siteUrl).toBe("https://blog.example.com/");
+  it("matches exactly, or a URL that normalizes to the same one", () => {
+    expect(resolveSite("https://example.com/", sites)).toEqual({ site: sites[3] });
+    expect(resolveSite("https://example.com", sites)).toEqual({ site: sites[3] });
+    expect(resolveSite("kweqoo.net", sites)).toEqual({ site: sites[0] });
+    expect(resolveSite("blog.example.com", sites)).toEqual({ site: sites[1] });
+  });
+
+  it("never swaps an explicit URL or sc-domain for a different property", () => {
+    expect(() => resolveSite("https://blog.example.com/x", sites)).toThrow(/no Search Console property is exactly/);
+    expect(() => resolveSite("http://example.com/", sites)).toThrow(/is exactly/);
+    expect(() => resolveSite("sc-domain:other.example", sites)).toThrow(/is exactly/);
   });
 
   it("refuses an ambiguous or unknown host", () => {
     expect(() => resolveSite("example.com", sites)).toThrow(/more than one property/);
     expect(() => resolveSite("nope.org", sites)).toThrow(/no Search Console property matches "nope.org"/);
+  });
+
+  it("narrows a Domain property to a subdomain it covers", () => {
+    expect(resolveSite("kabuto-zukan.kweqoo.net", sites)).toEqual({ site: sites[0], host: "kabuto-zukan.kweqoo.net" });
+    expect(hostFilter("kabuto-zukan.kweqoo.net")).toEqual({
+      dimension: "page",
+      operator: "includingRegex",
+      expression: "^https?://kabuto-zukan\\.kweqoo\\.net(/|$)",
+    });
   });
 });
