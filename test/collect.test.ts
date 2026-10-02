@@ -129,3 +129,24 @@ describe("round 2", () => {
     expect(rows[0]?.aggregation).toBe("byProperty");
   });
 });
+
+describe("round 3", () => {
+  it("reads a fixed range by the fresh option, whatever the window's dataState says", async () => {
+    const asked: QueryBody[] = [];
+    const q: Query = async (site, body) => {
+      asked.push(body);
+      return fake([])(site, body);
+    };
+    const finalWindow = { start: "2026-09-25", end: "2026-10-01", mode: "fixed" as const, dataState: "final" as const };
+    const fresh = await siteReport("sc-domain:kweqoo.net", { days: 7, fresh: true, compare: true, fixed: finalWindow }, "2026-10-01", q);
+    expect(fresh.window.dataState).toBe("all");
+    expect(fresh.previous?.window.dataState).toBe("all");
+    expect(asked.slice(1).every((b) => b.dataState === "all")).toBe(true);
+
+    asked.length = 0;
+    const allWindow = { ...finalWindow, dataState: "all" as const, incompleteFrom: "2026-09-30" };
+    const final = await siteReport("sc-domain:kweqoo.net", { days: 7, fresh: false, fixed: allWindow }, "2026-10-01", q);
+    expect(final.window).toEqual({ start: "2026-09-25", end: "2026-10-01", mode: "fixed", dataState: "final" });
+    expect(asked.every((b) => b.dataState === "final")).toBe(true);
+  });
+});

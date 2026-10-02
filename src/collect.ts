@@ -84,14 +84,19 @@ function scope(opts: ReportOptions): Partial<QueryBody> {
  * data ends.
  */
 export async function windowFor(siteUrl: string, opts: ReportOptions, today: string, query: Query): Promise<Window> {
-  if (opts.fixed && !opts.fresh) return opts.fixed;
-  const probe = await query(siteUrl, { ...probeBody(today), ...scope(opts) });
   if (opts.fixed) {
+    // `fresh` decides how the range is read, whatever the window says, so
+    // the request and the label cannot disagree.
+    const { incompleteFrom: _ignored, ...range } = opts.fixed;
+    void _ignored;
+    if (!opts.fresh) return { ...range, dataState: "final" };
     // A fixed range read with preliminary data: keep the range, record where
     // preliminary data starts.
+    const probe = await query(siteUrl, { ...probeBody(today), ...scope(opts) });
     const incompleteFrom = probe.metadata?.firstIncompleteDate;
-    return { ...opts.fixed, ...(incompleteFrom ? { incompleteFrom } : {}) };
+    return { ...range, dataState: "all", ...(incompleteFrom ? { incompleteFrom } : {}) };
   }
+  const probe = await query(siteUrl, { ...probeBody(today), ...scope(opts) });
   return chooseWindow(probe, opts.days, today, opts.fresh);
 }
 
