@@ -5,12 +5,16 @@ export interface ServiceAccount {
   token_uri?: string;
 }
 
-/** The four Search Console metrics. `ctr` is 0..1; `position` is the average position (1 = top). */
+/**
+ * The four Search Console metrics. `ctr` is 0..1; `position` is the average
+ * position (1 = top), or null when Search Console returned none (no
+ * impressions, or a search type without positions such as Discover).
+ */
 export interface Metrics {
   clicks: number;
   impressions: number;
   ctr: number;
-  position: number;
+  position: number | null;
 }
 
 /** A Search Console property and the caller's permission on it. */

@@ -9,6 +9,7 @@
  */
 
 import { createSign } from "node:crypto";
+import { exchange, type Sleep } from "./http.js";
 import type { ServiceAccount } from "./types.js";
 
 /** Read-only Search Console access; enough for sites.list and searchAnalytics.query. */
@@ -51,21 +52,27 @@ export async function requestAccessToken(
   sa: ServiceAccount,
   fetchFn: typeof fetch = fetch,
   iatSec: number = Math.floor(Date.now() / 1000),
+  sleep?: Sleep,
 ): Promise<string> {
   const assertion = createAssertion(sa, WEBMASTERS_SCOPE, iatSec);
-  const res = await fetchFn(sa.token_uri ?? DEFAULT_TOKEN_URI, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-    }),
-  });
-  const text = await res.text();
+  // Same timeout and retry as the API calls (see http.ts).
+  const res = await exchange(
+    sa.token_uri ?? DEFAULT_TOKEN_URI,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion,
+      }).toString(),
+    },
+    fetchFn,
+    sleep,
+  );
   if (!res.ok) {
-    throw new Error(`token request failed (HTTP ${res.status}): ${text.slice(0, 300)}`);
+    throw new Error(`token request failed (HTTP ${res.status}): ${res.text.slice(0, 300)}`);
   }
-  const token = (JSON.parse(text) as { access_token?: string }).access_token;
+  const token = (JSON.parse(res.text) as { access_token?: string }).access_token;
   if (!token) {
     throw new Error("token request returned no access_token");
   }

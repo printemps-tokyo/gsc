@@ -37,8 +37,11 @@ export function datesBetween(start: string, end: string): string[] {
   return out;
 }
 
-/** How far back the probe for the latest date looks, beyond the window itself. */
-export const PROBE_SLACK_DAYS = 10;
+/**
+ * How far back the probe for the complete-data boundary looks. The boundary
+ * is near today, so the probe does not grow with --days.
+ */
+export const PROBE_DAYS = 10;
 
 /** The date range a report covers, and how its end was chosen. */
 export interface Window {
@@ -50,6 +53,8 @@ export interface Window {
    * --start/--end.
    */
   mode: "final" | "fresh" | "fixed";
+  /** Which data the range was read with: "final" (complete only) or "all" (with preliminary data). */
+  dataState: "final" | "all";
   /** First date still being collected, when Search Console reported one. */
   incompleteFrom?: string;
   /**
@@ -65,9 +70,9 @@ export interface Window {
  * data (`dataState: "all"`) because only then does the response carry
  * `metadata.firstIncompleteDate`.
  */
-export function probeBody(days: number, today: string): { startDate: string; endDate: string; dimensions: string[]; dataState: "all" } {
+export function probeBody(today: string): { startDate: string; endDate: string; dimensions: string[]; dataState: "all" } {
   return {
-    startDate: addDays(today, -(days + PROBE_SLACK_DAYS)),
+    startDate: addDays(today, -(PROBE_DAYS - 1)),
     endDate: today,
     dimensions: ["date"],
     dataState: "all",
@@ -101,6 +106,7 @@ export function chooseWindow(probe: QueryResponse, days: number, today: string, 
     start: addDays(end, -(days - 1)),
     end,
     mode: fresh ? "fresh" : "final",
+    dataState: fresh ? "all" : "final",
     ...(incompleteFrom ? { incompleteFrom } : {}),
     ...(boundary ? { boundary } : {}),
   };
@@ -114,11 +120,11 @@ export function isDate(value: string): boolean {
 }
 
 /** A window given explicitly with --start and --end (both inclusive, PT dates). */
-export function fixedWindow(start: string, end: string, today: string): Window {
+export function fixedWindow(start: string, end: string, today: string, fresh = false): Window {
   if (!isDate(start) || !isDate(end)) throw new Error("--start and --end must be dates in YYYY-MM-DD form");
   if (start > end) throw new Error("--start must not be after --end");
   if (end > today) throw new Error(`--end ${end} is in the future (today is ${today} in Pacific Time)`);
-  return { start, end, mode: "fixed" };
+  return { start, end, mode: "fixed", dataState: fresh ? "all" : "final" };
 }
 
 /** Number of days in a window, inclusive. */
@@ -126,19 +132,38 @@ export function windowDays(w: Window): number {
   return datesBetween(w.start, w.end).length;
 }
 
-/** The window of the same length that ends the day before `w` starts, for --compare. */
+/**
+ * The window of the same length that ends the day before `w` starts, for
+ * --compare. It is read the same way as `w` (same data state), and keeps the
+ * preliminary marker when the earlier range still reaches into it.
+ */
 export function previousWindow(w: Window): Window {
   const len = windowDays(w);
   const end = addDays(w.start, -1);
-  return { start: addDays(end, -(len - 1)), end, mode: w.mode === "fixed" ? "fixed" : "final" };
+  return {
+    start: addDays(end, -(len - 1)),
+    end,
+    mode: w.mode,
+    dataState: w.dataState,
+    ...(w.incompleteFrom && w.incompleteFrom <= end ? { incompleteFrom: w.incompleteFrom } : {}),
+    ...(w.boundary ? { boundary: w.boundary } : {}),
+  };
 }
+
+/** Whether a window holds preliminary data. */
+export function hasPreliminary(w: Window): boolean {
+  return w.dataState === "all" && w.incompleteFrom !== undefined && w.incompleteFrom <= w.end;
+}
+
+/** Search types whose data cannot be grouped by query (observed: HTTP 400 "cannot be grouped by query"). */
+export const NO_QUERY_TYPES = new Set(["discover", "googleNews"]);
 
 export function metricsOf(row: QueryRow | undefined): Metrics {
   return {
     clicks: row?.clicks ?? 0,
     impressions: row?.impressions ?? 0,
     ctr: row?.ctr ?? 0,
-    position: row?.position ?? 0,
+    position: typeof row?.position === "number" ? row.position : null,
   };
 }
 
@@ -248,5 +273,5 @@ export function resolveSite(input: string, sites: Site[]): Target {
 /** A page filter that keeps only pages on `host` (http or https). */
 export function hostFilter(host: string): DimensionFilter {
   const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return { dimension: "page", operator: "includingRegex", expression: `^https?://${escaped}(/|$)` };
+  return { dimension: "page", operator: "includingRegex", expression: `^https?://${escaped}(:[0-9]+)?(/|$)` };
 }

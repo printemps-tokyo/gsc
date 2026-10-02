@@ -5,6 +5,7 @@
 
 import type { QueryBody, QueryResponse } from "./api.js";
 import {
+  NO_QUERY_TYPES,
   chooseWindow,
   dailyOf,
   fetchSizeFor,
@@ -38,6 +39,12 @@ export interface ReportOptions {
   pages?: number;
 }
 
+/** How a top-n list was fetched: rows asked for and rows Search Console returned. */
+export interface TopFetch {
+  requested: number;
+  returned: number;
+}
+
 export interface SiteReport {
   siteUrl: string;
   host?: string;
@@ -50,12 +57,15 @@ export interface SiteReport {
   daily: { date: string; metrics: Metrics }[];
   queries?: { key: string; metrics: Metrics }[];
   pages?: { key: string; metrics: Metrics }[];
+  /** For each top-n list: when `returned` equals `requested`, more rows may exist beyond them. */
+  fetched?: { queries?: TopFetch; pages?: TopFetch };
 }
 
 export interface AllRow {
   site: Site;
   window?: Window;
   totals?: Metrics;
+  aggregation?: string;
   previous?: { window: Window; totals: Metrics };
   error?: string;
 }
@@ -74,8 +84,14 @@ function scope(opts: ReportOptions): Partial<QueryBody> {
  * data ends.
  */
 export async function windowFor(siteUrl: string, opts: ReportOptions, today: string, query: Query): Promise<Window> {
-  if (opts.fixed) return opts.fixed;
-  const probe = await query(siteUrl, { ...probeBody(opts.days, today), ...scope(opts) });
+  if (opts.fixed && !opts.fresh) return opts.fixed;
+  const probe = await query(siteUrl, { ...probeBody(today), ...scope(opts) });
+  if (opts.fixed) {
+    // A fixed range read with preliminary data: keep the range, record where
+    // preliminary data starts.
+    const incompleteFrom = probe.metadata?.firstIncompleteDate;
+    return { ...opts.fixed, ...(incompleteFrom ? { incompleteFrom } : {}) };
+  }
   return chooseWindow(probe, opts.days, today, opts.fresh);
 }
 
@@ -83,8 +99,7 @@ function rangeBody(window: Window, opts: ReportOptions, extra: Partial<QueryBody
   return {
     startDate: window.start,
     endDate: window.end,
-    // Fixed windows ask for complete data too; --fresh opts into preliminary data.
-    dataState: opts.fresh ? "all" : "final",
+    dataState: window.dataState,
     ...scope(opts),
     ...extra,
   };
@@ -98,6 +113,9 @@ async function previousTotals(siteUrl: string, window: Window, opts: ReportOptio
 
 /** Totals, a daily series and optional top queries, pages and comparison for one site. */
 export async function siteReport(siteUrl: string, opts: ReportOptions, today: string, query: Query): Promise<SiteReport> {
+  if (opts.queries && opts.type && NO_QUERY_TYPES.has(opts.type)) {
+    throw new Error(`Search Console cannot group ${opts.type} data by query; drop --queries (--pages works)`);
+  }
   const window = await windowFor(siteUrl, opts, today, query);
   // With no dimensions the single row is the property's total for the range.
   const [totals, daily, queries, pages, previous] = await Promise.all([
@@ -122,6 +140,16 @@ export async function siteReport(siteUrl: string, opts: ReportOptions, today: st
     daily: dailyOf(daily, window),
     ...(queries ? { queries: rankedOf(queries, opts.queries) } : {}),
     ...(pages ? { pages: rankedOf(pages, opts.pages) } : {}),
+    ...(queries || pages
+      ? {
+          fetched: {
+            ...(queries && opts.queries
+              ? { queries: { requested: fetchSizeFor(opts.queries), returned: queries.rows?.length ?? 0 } }
+              : {}),
+            ...(pages && opts.pages ? { pages: { requested: fetchSizeFor(opts.pages), returned: pages.rows?.length ?? 0 } } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -146,7 +174,13 @@ export async function allReports(sites: Site[], opts: ReportOptions, today: stri
           query(site.siteUrl, rangeBody(window, opts)),
           previousTotals(site.siteUrl, window, opts, query),
         ]);
-        out[i] = { site, window, totals: totalsOf(totals), ...(previous ? { previous } : {}) };
+        out[i] = {
+          site,
+          window,
+          totals: totalsOf(totals),
+          ...(totals.responseAggregationType ? { aggregation: totals.responseAggregationType } : {}),
+          ...(previous ? { previous } : {}),
+        };
       } catch (err) {
         out[i] = { site, error: (err as Error).message };
       }

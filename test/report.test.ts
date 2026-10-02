@@ -29,9 +29,10 @@ describe("dates", () => {
     expect(datesBetween("2026-09-29", "2026-10-01")).toEqual(["2026-09-29", "2026-09-30", "2026-10-01"]);
   });
 
-  it("probes back far enough with fresh data", () => {
-    expect(probeBody(7, "2026-10-01")).toEqual({
-      startDate: "2026-09-14",
+  it("probes the recent days with fresh data", () => {
+    // The probe covers the last 10 days whatever --days is.
+    expect(probeBody("2026-10-01")).toEqual({
+      startDate: "2026-09-22",
       endDate: "2026-10-01",
       dimensions: ["date"],
       dataState: "all",
@@ -53,14 +54,14 @@ describe("chooseWindow", () => {
     expect(chooseWindow(probe, 3, "2026-10-01", false)).toEqual({
       start: "2026-09-27",
       end: "2026-09-29",
-      mode: "final",
+      mode: "final", dataState: "final",
       incompleteFrom: "2026-09-30",
       boundary: "reported",
     });
   });
 
   it("ends today in fresh mode", () => {
-    expect(chooseWindow(probe, 3, "2026-10-01", true)).toMatchObject({ start: "2026-09-29", end: "2026-10-01", mode: "fresh" });
+    expect(chooseWindow(probe, 3, "2026-10-01", true)).toMatchObject({ start: "2026-09-29", end: "2026-10-01", mode: "fresh", dataState: "all" });
   });
 
   it("without an incomplete date, ends yesterday and says the end is assumed", () => {
@@ -70,7 +71,7 @@ describe("chooseWindow", () => {
     expect(chooseWindow(sparse, 7, "2026-10-01", false)).toEqual({
       start: "2026-09-24",
       end: "2026-09-30",
-      mode: "final",
+      mode: "final", dataState: "final",
       boundary: "assumed",
     });
     expect(chooseWindow({}, 1, "2026-10-01", false)).toMatchObject({ end: "2026-09-30", boundary: "assumed" });
@@ -79,7 +80,7 @@ describe("chooseWindow", () => {
 
 describe("fixed and previous windows", () => {
   it("validates --start/--end", () => {
-    expect(fixedWindow("2026-09-01", "2026-09-30", "2026-10-01")).toEqual({ start: "2026-09-01", end: "2026-09-30", mode: "fixed" });
+    expect(fixedWindow("2026-09-01", "2026-09-30", "2026-10-01")).toEqual({ start: "2026-09-01", end: "2026-09-30", mode: "fixed", dataState: "final" });
     expect(() => fixedWindow("2026-09-31", "2026-09-30", "2026-10-01")).toThrow(/YYYY-MM-DD/);
     expect(() => fixedWindow("2026-09-30", "2026-09-01", "2026-10-01")).toThrow(/not be after/);
     expect(() => fixedWindow("2026-09-01", "2026-10-02", "2026-10-01")).toThrow(/future/);
@@ -88,14 +89,29 @@ describe("fixed and previous windows", () => {
   });
 
   it("compares against the same number of days just before", () => {
-    const w = { start: "2026-09-23", end: "2026-09-29", mode: "final" as const, boundary: "reported" as const };
+    const w = { start: "2026-09-23", end: "2026-09-29", mode: "final" as const, dataState: "final" as const, boundary: "reported" as const };
     expect(windowDays(w)).toBe(7);
-    expect(previousWindow(w)).toEqual({ start: "2026-09-16", end: "2026-09-22", mode: "final" });
+    expect(previousWindow(w)).toEqual({
+      start: "2026-09-16",
+      end: "2026-09-22",
+      mode: "final",
+      dataState: "final",
+      boundary: "reported",
+    });
+    // Read the same way as the current range, preliminary marker kept only when it reaches back that far.
+    const fresh = { start: "2026-10-01", end: "2026-10-01", mode: "fresh" as const, dataState: "all" as const, incompleteFrom: "2026-09-30" };
+    expect(previousWindow(fresh)).toEqual({
+      start: "2026-09-30",
+      end: "2026-09-30",
+      mode: "fresh",
+      dataState: "all",
+      incompleteFrom: "2026-09-30",
+    });
   });
 });
 
 describe("rows", () => {
-  const window = { start: "2026-09-27", end: "2026-09-29", mode: "final" as const };
+  const window = { start: "2026-09-27", end: "2026-09-29", mode: "final" as const, dataState: "final" as const };
 
   it("fills days Search Console omitted with zeros", () => {
     const daily = dailyOf({ rows: [{ keys: ["2026-09-28"], clicks: 1, impressions: 36, ctr: 0.03, position: 12 }] }, window);
@@ -113,7 +129,9 @@ describe("rows", () => {
       ctr: 0,
       position: 15.65,
     });
-    expect(totalsOf({})).toEqual({ clicks: 0, impressions: 0, ctr: 0, position: 0 });
+    // No position in the response (no impressions, or Discover) stays null, not 0.
+    expect(totalsOf({})).toEqual({ clicks: 0, impressions: 0, ctr: 0, position: null });
+    expect(totalsOf({ rows: [{ clicks: 1, impressions: 50, ctr: 0.02 }] }).position).toBeNull();
     expect(rankedOf({ rows: [{ keys: ["kweqoo"], clicks: 3 }] })[0]?.key).toBe("kweqoo");
     // Ties on clicks are broken by impressions, then by key, and cut to n.
     const ranked = rankedOf(
@@ -162,7 +180,12 @@ describe("resolveSite", () => {
     expect(hostFilter("kabuto-zukan.kweqoo.net")).toEqual({
       dimension: "page",
       operator: "includingRegex",
-      expression: "^https?://kabuto-zukan\\.kweqoo\\.net(/|$)",
+      expression: "^https?://kabuto-zukan\\.kweqoo\\.net(:[0-9]+)?(/|$)",
     });
+    const re = new RegExp(hostFilter("blog.example.com").expression);
+    expect(re.test("https://blog.example.com:8443/a")).toBe(true);
+    expect(re.test("https://blog.example.com")).toBe(true);
+    expect(re.test("https://blog.example.com.evil.test/")).toBe(false);
+    expect(re.test("https://xblog.example.com/")).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 /** Markdown and JSON output for the three modes. Pure. */
 
 import type { AllRow, SiteReport } from "./collect.js";
-import { windowDays, type Window } from "./report.js";
+import { hasPreliminary, windowDays, type Window } from "./report.js";
 import type { Metrics, Site } from "./types.js";
 
 function int(n: number): string {
@@ -12,9 +12,9 @@ function pct(ctr: number): string {
   return `${(ctr * 100).toFixed(1)}%`;
 }
 
-/** Average position; "-" when there were no impressions to average. */
+/** Average position; "-" when there is none (no impressions, or a search type without positions). */
 function pos(m: Metrics): string {
-  return m.impressions > 0 ? m.position.toFixed(1) : "-";
+  return m.impressions > 0 && m.position !== null ? m.position.toFixed(1) : "-";
 }
 
 function cells(m: Metrics): string[] {
@@ -33,7 +33,10 @@ function signed(n: number, digits = 0): string {
  */
 function cellsWithChange(m: Metrics, prev: Metrics | undefined): string[] {
   if (!prev) return cells(m);
-  const position = m.impressions > 0 && prev.impressions > 0 ? ` (${signed(m.position - prev.position, 1)})` : "";
+  const position =
+    m.impressions > 0 && prev.impressions > 0 && m.position !== null && prev.position !== null
+      ? ` (${signed(m.position - prev.position, 1)})`
+      : "";
   return [
     `${int(m.clicks)} (${signed(m.clicks - prev.clicks)})`,
     `${int(m.impressions)} (${signed(m.impressions - prev.impressions)})`,
@@ -49,13 +52,11 @@ function cell(text: string): string {
 /** The range and what kind of data it holds, in one line. */
 export function describeWindow(w: Window): string {
   const range = `${w.start}..${w.end}`;
-  const preliminary = w.incompleteFrom && w.incompleteFrom <= w.end ? w.incompleteFrom : undefined;
-  if (w.mode === "fixed") return `${range} (as requested, Pacific Time)`;
-  if (w.mode === "fresh") {
-    return preliminary
-      ? `${range} (includes preliminary data from ${preliminary}, Pacific Time)`
-      : `${range} (Pacific Time)`;
+  if (hasPreliminary(w)) return `${range} (includes preliminary data from ${w.incompleteFrom}, Pacific Time)`;
+  if (w.mode === "fixed") {
+    return w.dataState === "all" ? `${range} (as requested, with preliminary data, Pacific Time)` : `${range} (as requested, complete data only, Pacific Time)`;
   }
+  if (w.mode === "fresh") return `${range} (Pacific Time)`;
   return w.boundary === "assumed"
     ? `${range} (Pacific Time; Search Console did not report where complete data ends, so the newest days may still change)`
     : `${range} (complete data, Pacific Time)`;
@@ -64,8 +65,8 @@ export function describeWindow(w: Window): string {
 /** The range cell of the --all table, with a short note when it is not plain complete data. */
 function rangeCell(w: Window): string {
   const range = `${w.start}..${w.end}`;
-  if (w.mode === "fresh" && w.incompleteFrom && w.incompleteFrom <= w.end) return `${range} (preliminary from ${w.incompleteFrom})`;
-  if (w.mode === "final" && w.boundary === "assumed") return `${range} (end assumed)`;
+  if (hasPreliminary(w)) return `${range} (preliminary from ${w.incompleteFrom})`;
+  if (w.boundary === "assumed") return `${range} (end assumed)`;
   return range;
 }
 
@@ -125,7 +126,7 @@ export function renderSiteMarkdown(r: SiteReport): string {
     `- Impressions: ${impressions}`,
     `- CTR: ${ctr}`,
     `- Average position: ${position}`,
-    ...(r.previous ? ["", `Changes are against ${r.previous.window.start}..${r.previous.window.end}.`] : []),
+    ...(r.previous ? ["", `Changes are against ${describeWindow(r.previous.window)}.`] : []),
     "",
     "## Daily",
     "",
@@ -141,6 +142,15 @@ export function renderSiteMarkdown(r: SiteReport): string {
       "Search Console leaves rare queries out of query rows to protect privacy, so the query rows can add up to less than the totals.",
     );
   }
+  const capped = (["queries", "pages"] as const).filter((k) => {
+    const f = r.fetched?.[k];
+    return f !== undefined && f.returned >= f.requested;
+  });
+  if (capped.length > 0) {
+    lines.push(
+      `The ${capped.join(" and ")} list is ranked from the first ${r.fetched?.[capped[0]!]?.requested.toLocaleString("en-US")} rows Search Console returned; more rows exist beyond them.`,
+    );
+  }
   return lines.join("\n").replace(/\n*$/, "\n");
 }
 
@@ -148,8 +158,9 @@ export function renderSiteJson(r: SiteReport): string {
   return JSON.stringify(r, null, 2) + "\n";
 }
 
-export function renderAllMarkdown(rows: AllRow[], days: number): string {
+export function renderAllMarkdown(rows: AllRow[], days: number, type = "web"): string {
   const lines = [`# Search Console — every property, ${days} days`, ""];
+  if (type !== "web") lines.push(`Search type: ${type}.`, "");
   if (rows.length === 0) {
     lines.push("No properties are visible to these credentials.");
     return lines.join("\n") + "\n";
@@ -165,15 +176,20 @@ export function renderAllMarkdown(rows: AllRow[], days: number): string {
     lines.push("", "## Errors");
     for (const r of failed) lines.push(`- ${r.site.siteUrl}: ${r.error}`);
   }
-  const mode = rows.find((r) => r.window)?.window?.mode;
-  lines.push(
-    "",
+  const windows = rows.flatMap((r) => (r.window ? [r.window] : []));
+  const mode = windows[0]?.mode;
+  const note =
     mode === "fresh"
       ? "Ranges are in Pacific Time and include preliminary data, which can still change."
       : mode === "fixed"
-        ? "Ranges are in Pacific Time, as requested."
-        : "Ranges are in Pacific Time and end on each property's last day of complete data.",
-  );
+        ? `Ranges are in Pacific Time, as requested${windows[0]?.dataState === "all" ? ", with preliminary data" : ", complete data only"}.`
+        : windows.some((w) => w.boundary === "assumed")
+          ? "Ranges are in Pacific Time. Each ends on the property's last day of complete data, except where marked \"end assumed\": Search Console did not report that day, so the range ends yesterday and its newest days may still change."
+          : "Ranges are in Pacific Time and end on each property's last day of complete data.";
+  lines.push("", note);
+  if (rows.some((r) => r.aggregation === "byPage")) {
+    lines.push("Some properties report numbers aggregated by page; see aggregation in the JSON output.");
+  }
   if (rows.some((r) => r.previous)) {
     lines.push(
       "Changes in parentheses are against the same number of days just before each range; CTR in percentage points; for position, lower is better.",
@@ -182,16 +198,18 @@ export function renderAllMarkdown(rows: AllRow[], days: number): string {
   return lines.join("\n") + "\n";
 }
 
-export function renderAllJson(rows: AllRow[], days: number): string {
+export function renderAllJson(rows: AllRow[], days: number, type = "web"): string {
   return (
     JSON.stringify(
       {
         days,
+        type,
         properties: rows.map((r) => ({
           siteUrl: r.site.siteUrl,
           permissionLevel: r.site.permissionLevel,
           ...(r.window ? { window: r.window } : {}),
           ...(r.totals ? { totals: r.totals } : { error: r.error ?? "unknown error" }),
+          ...(r.aggregation ? { aggregation: r.aggregation } : {}),
           ...(r.previous ? { previous: r.previous } : {}),
         })),
       },

@@ -12,7 +12,13 @@ export { listSites, querySite } from "./api.js";
 export type { QueryBody, QueryResponse, QueryRow } from "./api.js";
 export {
   SEARCH_CONSOLE_TIME_ZONE,
-  PROBE_SLACK_DAYS,
+  PROBE_DAYS,
+  NO_QUERY_TYPES,
+  hasPreliminary,
+  fixedWindow,
+  previousWindow,
+  windowDays,
+  hostFilter,
   todayPT,
   addDays,
   datesBetween,

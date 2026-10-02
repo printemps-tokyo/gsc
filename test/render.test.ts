@@ -19,23 +19,23 @@ describe("render", () => {
   });
 
   it("describes the window", () => {
-    expect(describeWindow({ start: "2026-09-27", end: "2026-09-29", mode: "final" })).toBe(
+    expect(describeWindow({ start: "2026-09-27", end: "2026-09-29", mode: "final", dataState: "final" })).toBe(
       "2026-09-27..2026-09-29 (complete data, Pacific Time)",
     );
-    expect(describeWindow({ start: "2026-09-29", end: "2026-10-01", mode: "fresh", incompleteFrom: "2026-09-30" })).toContain(
+    expect(describeWindow({ start: "2026-09-29", end: "2026-10-01", mode: "fresh", dataState: "all", incompleteFrom: "2026-09-30" })).toContain(
       "includes preliminary data from 2026-09-30",
     );
-    expect(describeWindow({ start: "2026-09-24", end: "2026-09-30", mode: "final", boundary: "assumed" })).toContain(
+    expect(describeWindow({ start: "2026-09-24", end: "2026-09-30", mode: "final", dataState: "final", boundary: "assumed" })).toContain(
       "did not report where complete data ends",
     );
-    expect(describeWindow({ start: "2026-09-01", end: "2026-09-30", mode: "fixed" })).toContain("as requested");
+    expect(describeWindow({ start: "2026-09-01", end: "2026-09-30", mode: "fixed", dataState: "final" })).toContain("as requested");
   });
 
   it("renders a site report with totals, daily rows and top queries", () => {
     const r: SiteReport = {
       siteUrl: "sc-domain:kweqoo.net",
       type: "web",
-      window: { start: "2026-09-28", end: "2026-09-29", mode: "final" },
+      window: { start: "2026-09-28", end: "2026-09-29", mode: "final", dataState: "final" },
       totals: m(2, 1094, 0.00183, 15.65),
       daily: [
         { date: "2026-09-28", metrics: m(0, 0, 0, 0) },
@@ -58,7 +58,7 @@ describe("render", () => {
     const rows = [
       {
         site: { siteUrl: "sc-domain:kweqoo.net", permissionLevel: "siteFullUser" },
-        window: { start: "2026-09-27", end: "2026-09-29", mode: "final" as const },
+        window: { start: "2026-09-27", end: "2026-09-29", mode: "final" as const, dataState: "final" as const },
         totals: m(0, 106, 0, 15.65),
       },
       { site: { siteUrl: "sc-domain:broken.example", permissionLevel: "siteFullUser" }, error: "HTTP 403" },
@@ -81,9 +81,9 @@ describe("comparisons and scope", () => {
       [
         {
           site: { siteUrl: "sc-domain:example.com", permissionLevel: "siteOwner" },
-          window: { start: "2026-09-23", end: "2026-09-29", mode: "final", boundary: "reported" },
+          window: { start: "2026-09-23", end: "2026-09-29", mode: "final", dataState: "final", boundary: "reported" },
           totals,
-          previous: { window: { start: "2026-09-16", end: "2026-09-22", mode: "final" }, totals: prevTotals },
+          previous: { window: { start: "2026-09-16", end: "2026-09-22", mode: "final", dataState: "final" }, totals: prevTotals },
         },
       ],
       7,
@@ -97,12 +97,12 @@ describe("comparisons and scope", () => {
       [
         {
           site: { siteUrl: "sc-domain:a.example", permissionLevel: "siteOwner" },
-          window: { start: "2026-09-29", end: "2026-10-01", mode: "fresh", incompleteFrom: "2026-09-30" },
+          window: { start: "2026-09-29", end: "2026-10-01", mode: "fresh", dataState: "all", incompleteFrom: "2026-09-30" },
           totals,
         },
         {
           site: { siteUrl: "sc-domain:b.example", permissionLevel: "siteOwner" },
-          window: { start: "2026-09-28", end: "2026-09-30", mode: "final", boundary: "assumed" },
+          window: { start: "2026-09-28", end: "2026-09-30", mode: "final", dataState: "final", boundary: "assumed" },
           totals,
         },
       ],
@@ -117,7 +117,7 @@ describe("comparisons and scope", () => {
       siteUrl: "sc-domain:kweqoo.net",
       host: "kabuto-zukan.kweqoo.net",
       type: "image",
-      window: { start: "2026-09-29", end: "2026-09-29", mode: "final", boundary: "reported" },
+      window: { start: "2026-09-29", end: "2026-09-29", mode: "final", dataState: "final", boundary: "reported" },
       totals,
       aggregation: "byPage",
       daily: [{ date: "2026-09-29", metrics: totals }],
@@ -125,5 +125,51 @@ describe("comparisons and scope", () => {
     expect(md).toContain("aggregated by page");
     expect(md).toContain("# kabuto-zukan.kweqoo.net — 1 days");
     expect(md).toContain("Pages on kabuto-zukan.kweqoo.net only (filtered from sc-domain:kweqoo.net). Search type: image.");
+  });
+});
+
+describe("round 2 rendering", () => {
+  const w = { start: "2026-09-27", end: "2026-09-29", mode: "final" as const, dataState: "final" as const, boundary: "reported" as const };
+
+  it("shows a missing position as '-' and does not diff it", () => {
+    const md = renderSiteMarkdown({
+      siteUrl: "sc-domain:a.example",
+      type: "discover",
+      window: w,
+      totals: { clicks: 3, impressions: 40, ctr: 0.075, position: null },
+      previous: { window: w, totals: { clicks: 1, impressions: 20, ctr: 0.05, position: null } },
+      daily: [],
+    });
+    expect(md).toContain("- Average position: -\n");
+  });
+
+  it("names the search type and explains assumed ends in --all", () => {
+    const md = renderAllMarkdown(
+      [
+        {
+          site: { siteUrl: "sc-domain:a.example", permissionLevel: "siteOwner" },
+          window: { ...w, boundary: "assumed" },
+          totals: { clicks: 0, impressions: 1, ctr: 0, position: 2 },
+        },
+      ],
+      3,
+      "image",
+    );
+    expect(md).toContain("Search type: image.");
+    expect(md).toContain('except where marked "end assumed"');
+    expect(JSON.parse(renderAllJson([], 3, "image")).type).toBe("image");
+  });
+
+  it("says when a top-n list was cut at the fetch limit", () => {
+    const md = renderSiteMarkdown({
+      siteUrl: "sc-domain:a.example",
+      type: "web",
+      window: w,
+      totals: { clicks: 0, impressions: 0, ctr: 0, position: null },
+      daily: [],
+      pages: [],
+      fetched: { pages: { requested: 1000, returned: 1000 } },
+    });
+    expect(md).toContain("ranked from the first 1,000 rows");
   });
 });

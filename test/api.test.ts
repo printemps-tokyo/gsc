@@ -47,3 +47,28 @@ describe("querySite", () => {
     expect(s.calls()).toBe(3);
   });
 });
+
+describe("timeouts and retries cover the body and the token request", () => {
+  it("retries when the connection drops while the body is read", async () => {
+    let n = 0;
+    const f = (async () => {
+      n++;
+      if (n === 1) {
+        return { status: 200, ok: true, text: async () => Promise.reject(new TypeError("terminated")) } as unknown as Response;
+      }
+      return new Response('{"rows":[]}');
+    }) as typeof fetch;
+    expect(await querySite("sc-domain:a.example", body, "tok", f, noSleep)).toEqual({ rows: [] });
+    expect(n).toBe(2);
+  });
+
+  it("retries the token request on a server error", async () => {
+    const { requestAccessToken } = await import("../src/auth.js");
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const sa = { client_email: "x@y.iam.gserviceaccount.com", private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString() };
+    const s = sequence([new Response("x", { status: 503 }), new Response('{"access_token":"t"}')]);
+    expect(await requestAccessToken(sa, s.fetch, 1_700_000_000, noSleep)).toBe("t");
+    expect(s.calls()).toBe(2);
+  });
+});

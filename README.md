@@ -85,7 +85,7 @@ gsc --all --format json -o week.json
 | `--fresh` | End today (Pacific Time) and include preliminary data; with `--start`/`--end`, include preliminary data in that range | off |
 | `--start <date>` `--end <date>` | A fixed range, `YYYY-MM-DD` in Pacific Time, both inclusive; replaces `--days`. Without `--fresh`, days that are not complete yet count as no data | |
 | `--compare` | Also show the change against the same number of days just before the range | off |
-| `--type <type>` | Search type: `web`, `image`, `video`, `news`, `discover`, `googleNews` | `web` |
+| `--type <type>` | Search type: `web`, `image`, `video`, `news`, `discover`, `googleNews`. Discover and Google News data cannot be grouped by query (the API answers "cannot be grouped by query"), so `--queries` is refused for them; `--pages` works | `web` |
 | `--queries [n]` | With `--site`: top n queries by clicks, then impressions (at most 25,000) | `10` when given |
 | `--pages [n]` | With `--site`: top n pages by clicks, then impressions (at most 25,000) | `10` when given |
 | `--key-file <path>` | Service-account JSON key (or `GOOGLE_APPLICATION_CREDENTIALS`) | |
@@ -112,12 +112,15 @@ the exit code is 1.
   usually available in 2–3 days"
   ([Troubleshooting data discrepancies](https://support.google.com/webmasters/answer/17010575)).
   So by default the range ends on each property's last day of complete data.
-  gsc finds that day by asking for fresh data once and reading
-  `metadata.firstIncompleteDate`; the range ends the day before it. If Search
+  gsc finds that day by asking for the last 10 days with fresh data once and
+  reading `metadata.firstIncompleteDate`; the range ends the day before it. If Search
   Console does not report that date, the range ends yesterday and the output
   says the end is assumed, since its newest days may still change. With
   `--fresh` the range ends today and the output says from which date the data
-  is preliminary. `--start`/`--end` use the range as given.
+  is preliminary. `--start`/`--end` use the range as given; with `--fresh`
+  they read preliminary data too and say from which date it starts.
+- `--compare` reads the earlier range the same way as the current one
+  (complete data, or with preliminary data under `--fresh`).
 - `--days 7` is seven calendar days ending there. Days without data, which the
   API leaves out when grouping by date, show as zeros in the daily table.
 
@@ -139,14 +142,19 @@ the exit code is 1.
   ([Performance report](https://support.google.com/webmasters/answer/7576553)).
   The JSON output carries the aggregation Search Console reports
   (`aggregation`).
-- Position is the average position; it shows as `-` when there were no
-  impressions to average.
+- Position is the average position; it shows as `-` when Search Console
+  returns none (no impressions, or a search type without positions), and is
+  `null` in JSON.
+- When a top-n list was ranked from as many rows as were requested, the
+  output says more rows exist beyond them; the JSON carries `fetched`
+  (`requested`, `returned`).
 
 ## Network behaviour
 
-- Each request times out after 30 seconds. Server errors (5xx) and network
-  failures are retried twice with a short backoff; other errors are not,
-  since the same request fails the same way.
+- Each request, the token request included, times out after 30 seconds,
+  reading the body included. Server errors (5xx) and network failures,
+  including a connection dropped mid-body, are retried twice with a short
+  backoff; other errors are not, since the same request fails the same way.
 - When the quota is exceeded the error says to wait 15 minutes, as the
   [usage limits page](https://developers.google.com/webmaster-tools/limits)
   advises. `--all` queries four properties at a time.

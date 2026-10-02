@@ -199,7 +199,7 @@ async function main(): Promise<number> {
     if (values.type !== undefined && !TYPES.has(values.type)) {
       throw new Error(`--type must be one of ${[...TYPES].join(", ")}`);
     }
-    const fixed = values.start !== undefined ? fixedWindow(values.start, values.end!, today) : undefined;
+    const fixed = values.start !== undefined ? fixedWindow(values.start, values.end!, today, values.fresh === true) : undefined;
     opts = {
       days: positiveInt(values.days, "--days") ?? 7,
       fresh: values.fresh === true,
@@ -234,7 +234,11 @@ async function main(): Promise<number> {
     if (values.all) {
       const rows = await allReports(sites, opts, today, query);
       const days = opts.fixed ? windowDays(opts.fixed) : opts.days;
-      await emit(format === "json" ? renderAllJson(rows, days) : renderAllMarkdown(rows, days), values.output);
+      const type = opts.type ?? "web";
+      await emit(
+        format === "json" ? renderAllJson(rows, days, type) : renderAllMarkdown(rows, days, type),
+        values.output,
+      );
       return rows.some((r) => r.error) ? 1 : 0;
     }
     const target = resolveSite(site!, sites);
