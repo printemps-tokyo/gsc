@@ -23,7 +23,7 @@ API, and prints Markdown or JSON. No runtime dependencies.
 
 ## Requirements
 
-- Node.js >= 20
+- Node.js >= 22
 - A Google service account that is a user of your Search Console properties
   (one-time setup below)
 
