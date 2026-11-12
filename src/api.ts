@@ -81,7 +81,7 @@ export async function listSites(token: string, fetchFn: typeof fetch = fetch): P
   try {
     body = (await call(`${BASE}/sites`, { method: "GET" }, token, fetchFn)) as typeof body;
   } catch (err) {
-    throw new Error(`sites.list failed (${(err as Error).message})`);
+    throw new Error(`sites.list failed (${(err as Error).message})`, { cause: err });
   }
   return (body.siteEntry ?? []).map((s) => ({
     siteUrl: s.siteUrl ?? "",
@@ -107,6 +107,6 @@ export async function querySite(
       sleep,
     )) as QueryResponse;
   } catch (err) {
-    throw new Error(`searchAnalytics.query for ${siteUrl} failed (${(err as Error).message})`);
+    throw new Error(`searchAnalytics.query for ${siteUrl} failed (${(err as Error).message})`, { cause: err });
   }
 }
