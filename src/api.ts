@@ -7,7 +7,7 @@
  * - https://developers.google.com/webmaster-tools/limits
  */
 
-import { exchange, type Sleep } from "./http.js";
+import { exchange, type Sleep } from "./shared/http.js";
 import type { Site } from "./types.js";
 
 const BASE = "https://www.googleapis.com/webmasters/v3";

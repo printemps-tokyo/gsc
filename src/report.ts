@@ -6,29 +6,10 @@
 import type { DimensionFilter, QueryResponse, QueryRow } from "./api.js";
 import type { Metrics, Site } from "./types.js";
 
-/**
- * Search Console dates are Pacific Time: the API reference describes
- * startDate and endDate as "YYYY-MM-DD format, in PT time (UTC - 7:00/8:00)".
- */
-export const SEARCH_CONSOLE_TIME_ZONE = "America/Los_Angeles";
+import { addDays, isDate, SEARCH_CONSOLE_TIME_ZONE, todayPT } from "./shared/pt-date.js";
 
-/** Today's date in Pacific Time, as YYYY-MM-DD. */
-export function todayPT(now: Date = new Date()): string {
-  // en-CA formats dates as YYYY-MM-DD.
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: SEARCH_CONSOLE_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(now);
-}
-
-/** Shift a YYYY-MM-DD date by `n` days (calendar arithmetic, no time zone involved). */
-export function addDays(date: string, n: number): string {
-  const [y, m, d] = date.split("-").map(Number) as [number, number, number];
-  const t = Date.UTC(y, m - 1, d) + n * 86_400_000;
-  return new Date(t).toISOString().slice(0, 10);
-}
+// Search Console dates are Pacific Time; the date helpers are shared with sitepulse.
+export { addDays, isDate, SEARCH_CONSOLE_TIME_ZONE, todayPT };
 
 /** Every date from `start` to `end`, inclusive. */
 export function datesBetween(start: string, end: string): string[] {
@@ -110,13 +91,6 @@ export function chooseWindow(probe: QueryResponse, days: number, today: string, 
     ...(incompleteFrom ? { incompleteFrom } : {}),
     ...(boundary ? { boundary } : {}),
   };
-}
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** A valid calendar date in YYYY-MM-DD form. */
-export function isDate(value: string): boolean {
-  return DATE_RE.test(value) && addDays(value, 0) === value;
 }
 
 /** A window given explicitly with --start and --end (both inclusive, PT dates). */

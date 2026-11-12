@@ -1,9 +1,5 @@
 /** A Google service-account key, as found in the downloaded JSON file. */
-export interface ServiceAccount {
-  client_email: string;
-  private_key: string;
-  token_uri?: string;
-}
+export type { ServiceAccount } from "./shared/google-auth.js";
 
 /**
  * The four Search Console metrics. `ctr` is 0..1; `position` is the average
